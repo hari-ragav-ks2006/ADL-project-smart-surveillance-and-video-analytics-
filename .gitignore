@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs and local config
+.vscode/
+.idea/
+.agent/
+
+# Testing caches
+.pytest_cache/
+
+# Excel lock files
+~$*
+
+# OS specific
+Thumbs.db
+.DS_Store
+
+# Logs & Screenshots (keep directory structure)
+logs/screenshots/*.jpg
+!logs/screenshots/.gitkeep
+logs/*.db
+logs/*.xlsx
+!logs/.gitkeep

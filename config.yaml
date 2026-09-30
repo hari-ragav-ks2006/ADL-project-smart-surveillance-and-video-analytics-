@@ -1,0 +1,95 @@
+# ==============================================================================
+# Smart Video Surveillance and Analytics System Configuration
+# Two-Module Architecture: ATM Security & Restricted Zone Intrusion
+# ==============================================================================
+
+system:
+  app_name: "Smart Video Surveillance & Analytics System"
+  version: "1.0.0"
+  log_level: "INFO"
+  device: "auto" # "auto", "cpu", "cuda", "mps"
+
+video:
+  default_source: "0" # "0" for live webcam
+  sources:
+    atm: "0" # Live laptop webcam (strictly real-time webcam feed)
+    restricted: "sample_videos/hallway_cctv_intrusion.mp4" # Real indoor CCTV corridor intrusion video
+  frame_width: 960
+  frame_height: 540
+  target_fps: 30
+  frame_skip: 1 # Process every Nth frame for inference (1 = every frame)
+  display_window:
+    enabled: true
+    title: "Smart Surveillance Engine"
+    width: 960
+    height: 540
+    show_fps: true
+    show_hud: true
+    show_zones: true
+
+detection:
+  model_name: "yolov8n.pt" # "yolov8n.pt", "yolov8s.pt", "yolov8m.pt"
+  confidence_threshold: 0.45
+  iou_threshold: 0.45
+  tracker_type: "bytetrack.yaml" # "bytetrack.yaml" or "botsort.yaml"
+  # Target class: 0: person ONLY
+  target_classes:
+    - 0  # person
+
+zones:
+  restricted_zone:
+    name: "Restricted Corridor & Hallway Access"
+    color: [0, 0, 255] # BGR Red
+    polygon: # Configured over hallway doorway and passage in hallway_cctv_intrusion.mp4
+      - [350, 140]
+      - [750, 140]
+      - [820, 540]
+      - [280, 540]
+
+atm_module:
+  enabled: true
+  face_detection_confidence: 0.50
+  visibility_window_size: 30 # Rolling buffer size (~1s at 30fps)
+  covered_threshold: 0.30 # Drop below 30% rolling visibility triggers face covered
+  safe_recovery_threshold: 0.70 # Rise above 70% rolling visibility recovers to safe
+  show_debug_visibility: true # On-screen live rolling visibility % debug display
+  face_covered_debounce_sec: 1.5 # Seconds face landmarks missing before soft alert triggers
+  multi_person_debounce_sec: 1.5 # Seconds >1 person present before soft alert triggers
+  blackout_variance_threshold: 12.0 # Variance threshold below which frame is considered blacked out/tampered
+  blackout_duration_sec: 20.0 # 20 seconds near-zero variance before critical hard alert & phone escalation
+  tts_enabled: true # Announce alerts via Text-To-Speech
+  sound_siren_on_tamper: true
+  looping_alarm_on_hard_alert: true
+  simulated_dispatch_enabled: true
+  authority_contact: "Central Security Control & Precinct 4"
+
+twilio:
+  enabled: true
+  account_sid: "" # Twilio Account SID (or set TWILIO_ACCOUNT_SID env var)
+  auth_token: ""  # Twilio Auth Token (or set TWILIO_AUTH_TOKEN env var)
+  from_number: "" # e.g. "+1234567890" (or set TWILIO_FROM_NUMBER env var)
+  to_number: ""   # e.g. "+19876543210" (or set TWILIO_TO_NUMBER env var)
+
+restricted_module:
+  enabled: true
+  intrusion_debounce_sec: 0.5 # Seconds intruder inside zone before alert triggers
+  target_classes: [0] # 0: person
+  sound_siren_on_intrusion: true
+  tts_enabled: true
+  zone_id: "restricted_zone"
+
+alert_system:
+  escalation_timeout_sec: 15.0 # Seconds an unresolved soft alert takes to escalate to hard alert
+  auto_resolve_debounce_sec: 2.0 # Seconds condition must be clear before auto-resolving
+  audio_announcements: true
+
+persistence:
+  db_path: "logs/surveillance.db"
+  screenshots_dir: "logs/screenshots"
+  excel_export_path: "logs/surveillance_alerts.xlsx"
+  auto_export_excel: true
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  websocket_stream_fps: 20
