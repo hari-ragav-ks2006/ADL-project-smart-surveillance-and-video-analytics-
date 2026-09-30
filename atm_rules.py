@@ -77,7 +77,7 @@ class ATMRuleModule:
         self.face_covered_state: Dict[int, bool] = {}        # track_id -> bool (True=covered)
         self.face_state_start_time: Dict[int, datetime] = {}
 
-        # Initialize MediaPipe FaceLandmarker
+        # Initialize MediaPipe FaceLandmarker with multi-face support (num_faces=4)
         self.mediapipe_landmarker = None
         task_path = Path("models/face_landmarker.task")
         if task_path.exists():
@@ -91,163 +91,209 @@ class ATMRuleModule:
                     base_options=base_options,
                     output_face_blendshapes=False,
                     output_facial_transformation_matrixes=False,
-                    min_face_detection_confidence=0.25,
-                    min_face_presence_confidence=0.25,
-                    min_tracking_confidence=0.25,
-                    num_faces=1,
+                    min_face_detection_confidence=0.20,
+                    min_face_presence_confidence=0.20,
+                    min_tracking_confidence=0.20,
+                    num_faces=4,
                 )
                 self.mediapipe_landmarker = vision.FaceLandmarker.create_from_options(options)
-                logger.info("[ATM RULES] MediaPipe FaceLandmarker initialized successfully.")
+                logger.info("[ATM RULES] MediaPipe FaceLandmarker initialized successfully (multi-face).")
             except Exception as e:
                 logger.warning(f"[ATM RULES] Could not initialize MediaPipe FaceLandmarker: {e}")
 
+        # Initialize fast Haar Face Cascade for supplementary face/crowd verification
+        self.face_cascade = None
+        cascade_path = Path("models/haarcascade_frontalface_default.xml")
+        if cascade_path.exists():
+            try:
+                self.face_cascade = cv2.CascadeClassifier(str(cascade_path))
+                logger.info("[ATM RULES] Haar Frontal Face Cascade loaded.")
+            except Exception as e:
+                logger.warning(f"[ATM RULES] Could not load face cascade: {e}")
+
         import threading
         self._lock = threading.Lock()
+        self._next_face_person_id = 500
 
-    def _detect_face_and_landmarks(
+    def detect_all_faces(
         self,
         frame_bgr: np.ndarray,
-        person_bbox: Tuple[int, int, int, int],
-    ) -> Tuple[bool, Optional[Tuple[int, int, int, int]], float, List[Tuple[int, int]], Dict[str, Any]]:
+    ) -> List[Dict[str, Any]]:
         """
-        Runs face detection and landmark analysis within the person region.
-
+        Detect all faces and landmarks in full frame.
+        Combines MediaPipe multi-face landmarker and Haar cascade.
+        
         Returns:
-            (face_detected: bool,
-             face_bbox: Optional[(fx1, fy1, fx2, fy2)],
-             vis_score: float in [0.0, 1.0],
-             landmark_points: List[(x, y)],
-             debug_metrics: Dict)
+            List of dicts: [{"bbox": (fx1, fy1, fx2, fy2), "vis_score": float, "landmarks": list, "lms_raw": list}, ...]
         """
-        if self.mediapipe_landmarker is None:
-            return False, None, 0.0, [], {"error": "landmarker_uninitialized"}
-
         h, w = frame_bgr.shape[:2]
-        x1, y1, x2, y2 = person_bbox
+        detected_faces: List[Dict[str, Any]] = []
+        found_mp = False
 
-        bw = x2 - x1
-        bh = y2 - y1
-
-        # Crop head/upper-body region with safety padding
-        if (x1 == 0 and y1 == 0 and x2 >= w and y2 >= h) or (bw < 40 or bh < 40):
-            head_crop = frame_bgr
-            gx1, gy1 = 0, 0
-        else:
-            head_y1 = max(0, y1 - int(bh * 0.05))
-            head_y2 = min(h, y1 + int(bh * 0.70))
-            head_x1 = max(0, x1 - int(bw * 0.05))
-            head_x2 = min(w, x2 + int(bw * 0.05))
-            head_crop = frame_bgr[head_y1:head_y2, head_x1:head_x2]
-            gx1, gy1 = head_x1, head_y1
-
-        crop_h, crop_w = head_crop.shape[:2]
-        if crop_h < 20 or crop_w < 20:
-            return False, None, 0.0, [], {"reason": "crop_too_small"}
-
-        try:
-            import mediapipe as mp
-
-            rgb_crop = cv2.cvtColor(head_crop, cv2.COLOR_BGR2RGB)
-            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_crop)
-            with self._lock:
-                res = self.mediapipe_landmarker.detect(mp_img)
-
-            # Fallback to full frame if head crop missed
-            if (not res.face_landmarks or len(res.face_landmarks) == 0) and head_crop.shape[:2] != frame_bgr.shape[:2]:
-                full_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        if self.mediapipe_landmarker is not None:
+            try:
+                import mediapipe as mp
+                rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 with self._lock:
-                    res = self.mediapipe_landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=full_rgb))
+                    res = self.mediapipe_landmarker.detect(mp_img)
+
                 if res.face_landmarks and len(res.face_landmarks) > 0:
-                    head_crop = frame_bgr
-                    gx1, gy1 = 0, 0
-                    crop_h, crop_w = frame_bgr.shape[:2]
+                    found_mp = True
+                    for lms in res.face_landmarks:
+                        xs = [lm.x * w for lm in lms]
+                        ys = [lm.y * h for lm in lms]
+                        fx1 = int(np.clip(min(xs) - (max(xs) - min(xs)) * 0.10, 0, w))
+                        fy1 = int(np.clip(min(ys) - (max(ys) - min(ys)) * 0.10, 0, h))
+                        fx2 = int(np.clip(max(xs) + (max(xs) - min(xs)) * 0.10, 0, w))
+                        fy2 = int(np.clip(max(ys) + (max(ys) - min(ys)) * 0.10, 0, h))
 
-            if not res.face_landmarks or len(res.face_landmarks) == 0:
-                return False, None, 0.0, [], {"reason": "no_face_landmarks"}
+                        # Landmark extraction
+                        landmark_pts = []
+                        for idx in TARGET_LANDMARK_INDICES:
+                            px = int(np.clip(lms[idx].x * w, 0, w - 1))
+                            py = int(np.clip(lms[idx].y * h, 0, h - 1))
+                            landmark_pts.append((px, py))
 
-            lms = res.face_landmarks[0]
+                        # Evaluate skin chrominance
+                        vis_count = 0
+                        for px, py in landmark_pts:
+                            patch = frame_bgr[max(0, py - 3):min(h, py + 4), max(0, px - 3):min(w, px + 4)]
+                            if patch.size > 0:
+                                ycrcb = cv2.cvtColor(patch, cv2.COLOR_BGR2YCrCb)
+                                cr = float(np.mean(ycrcb[:, :, 1]))
+                                cb = float(np.mean(ycrcb[:, :, 2]))
+                                y_val = float(np.mean(ycrcb[:, :, 0]))
+                                if (105 <= cr <= 210) and (60 <= cb <= 165) and (18 <= y_val <= 252) and ((cr - cb) >= 2):
+                                    vis_count += 1
+                        vis_score = vis_count / float(len(TARGET_LANDMARK_INDICES)) if TARGET_LANDMARK_INDICES else 1.0
 
-            # 1. Compute Face Bounding Box
-            xs_crop = [lm.x * crop_w for lm in lms]
-            ys_crop = [lm.y * crop_h for lm in lms]
+                        detected_faces.append({
+                            "bbox": (fx1, fy1, fx2, fy2),
+                            "vis_score": vis_score,
+                            "landmarks": landmark_pts,
+                            "source": "mediapipe",
+                        })
+            except Exception as e:
+                logger.debug(f"[ATM RULES] MediaPipe detect_all_faces error: {e}")
 
-            fx1_local = min(xs_crop)
-            fy1_local = min(ys_crop)
-            fx2_local = max(xs_crop)
-            fy2_local = max(ys_crop)
+        # Supplementary Haar cascade face check for additional background / bystander faces
+        if self.face_cascade is not None:
+            try:
+                gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                haar_faces = self.face_cascade.detectMultiScale(
+                    gray, scaleFactor=1.15, minNeighbors=4, minSize=(35, 35)
+                )
+                for (hx, hy, hw, hh) in haar_faces:
+                    h_bbox = (int(hx), int(hy), int(hx + hw), int(hy + hh))
+                    # Check if already covered by an existing MediaPipe detection
+                    already_found = False
+                    for df in detected_faces:
+                        db = df["bbox"]
+                        # Overlap check
+                        ix1 = max(h_bbox[0], db[0])
+                        iy1 = max(h_bbox[1], db[1])
+                        ix2 = min(h_bbox[2], db[2])
+                        iy2 = min(h_bbox[3], db[3])
+                        if ix1 < ix2 and iy1 < iy2:
+                            inter_area = (ix2 - ix1) * (iy2 - iy1)
+                            h_area = hw * hh
+                            if inter_area / float(h_area) > 0.35:
+                                already_found = True
+                                break
+                    if not already_found:
+                        detected_faces.append({
+                            "bbox": h_bbox,
+                            "vis_score": 1.0,
+                            "landmarks": [],
+                            "source": "haar",
+                        })
+            except Exception as e:
+                logger.debug(f"[ATM RULES] Haar detect error: {e}")
 
-            face_w = fx2_local - fx1_local
-            face_h = fy2_local - fy1_local
+        return detected_faces
 
-            pad_fx = int(face_w * 0.12)
-            pad_fy = int(face_h * 0.12)
+    def fuse_persons_and_faces(
+        self,
+        frame_bgr: np.ndarray,
+        yolo_persons: List[TrackedObject],
+    ) -> Tuple[List[TrackedObject], List[Dict[str, Any]]]:
+        """
+        Fuses YOLO body detections with Multi-Face detections so all visible people
+        (including seated persons, bystanders leaning into frame, or upper-body webcam angles)
+        are reliably detected and tracked as distinct TrackedObjects.
+        """
+        h, w = frame_bgr.shape[:2]
+        faces = self.detect_all_faces(frame_bgr)
+        fused_list: List[TrackedObject] = list(yolo_persons)
 
-            global_fx1 = int(np.clip(gx1 + fx1_local - pad_fx, 0, w))
-            global_fy1 = int(np.clip(gy1 + fy1_local - pad_fy, 0, h))
-            global_fx2 = int(np.clip(gx1 + fx2_local + pad_fx, 0, w))
-            global_fy2 = int(np.clip(gy1 + fy2_local + pad_fy, 0, h))
-            face_bbox = (global_fx1, global_fy1, global_fx2, global_fy2)
+        # For each face, see if an existing YOLO person encompasses or overlaps it
+        for i, face in enumerate(faces):
+            fb = face["bbox"]
+            fcx = (fb[0] + fb[2]) / 2
+            fcy = (fb[1] + fb[3]) / 2
 
-            # 2. Extract Key Landmark Coordinates in global frame
-            landmark_pts = []
-            for idx in TARGET_LANDMARK_INDICES:
-                px = int(np.clip(gx1 + lms[idx].x * crop_w, 0, w - 1))
-                py = int(np.clip(gy1 + lms[idx].y * crop_h, 0, h - 1))
-                landmark_pts.append((px, py))
+            matched_yolo = False
+            for yp in yolo_persons:
+                yb = yp.bbox
+                # Containment or heavy overlap
+                if yb[0] <= fcx <= yb[2] and yb[1] <= fcy <= yb[3]:
+                    matched_yolo = True
+                    break
+                # Bounding box IoU overlap
+                ix1 = max(fb[0], yb[0])
+                iy1 = max(fb[1], yb[1])
+                ix2 = min(fb[2], yb[2])
+                iy2 = min(fb[3], yb[3])
+                if ix1 < ix2 and iy1 < iy2:
+                    inter_a = (ix2 - ix1) * (iy2 - iy1)
+                    face_a = (fb[2] - fb[0]) * (fb[3] - fb[1])
+                    if inter_a / float(max(1, face_a)) > 0.40:
+                        matched_yolo = True
+                        break
 
-            # 3. Sample forehead reference skin patch (landmark 10)
-            ref_x = int(np.clip(lms[10].x * crop_w, 3, crop_w - 4))
-            ref_y = int(np.clip(lms[10].y * crop_h, 3, crop_h - 4))
-            ref_patch = head_crop[
-                max(0, ref_y - 3) : min(crop_h, ref_y + 4),
-                max(0, ref_x - 3) : min(crop_w, ref_x + 4),
-            ]
+            if not matched_yolo:
+                # Synthesize a person bounding box from the face region (expanding downwards for shoulders/torso)
+                fw = fb[2] - fb[0]
+                fh = fb[3] - fb[1]
+                px1 = max(0, int(fb[0] - fw * 0.35))
+                py1 = max(0, int(fb[1] - fh * 0.15))
+                px2 = min(w, int(fb[2] + fw * 0.35))
+                py2 = min(h, int(fb[3] + fh * 2.4))
 
-            ref_cr, ref_cb = 145.0, 105.0
-            has_ref = False
-            if ref_patch.size > 0:
-                ref_ycrcb = cv2.cvtColor(ref_patch, cv2.COLOR_BGR2YCrCb)
-                ref_cr = float(np.mean(ref_ycrcb[:, :, 1]))
-                ref_cb = float(np.mean(ref_ycrcb[:, :, 2]))
-                has_ref = True
+                new_id = self._next_face_person_id
+                self._next_face_person_id += 1
+                if self._next_face_person_id > 999:
+                    self._next_face_person_id = 500
 
-            visible_points_count = 0
-            total_points = len(TARGET_LANDMARK_INDICES)
+                fused_person = TrackedObject(
+                    track_id=new_id,
+                    class_id=0,
+                    class_name="person",
+                    confidence=0.88,
+                    bbox=(px1, py1, px2, py2),
+                )
+                fused_list.append(fused_person)
 
-            for idx in TARGET_LANDMARK_INDICES:
-                lx = int(np.clip(lms[idx].x * crop_w, 3, crop_w - 4))
-                ly = int(np.clip(lms[idx].y * crop_h, 3, crop_h - 4))
-                pt_patch = head_crop[
-                    max(0, ly - 3) : min(crop_h, ly + 4),
-                    max(0, lx - 3) : min(crop_w, lx + 4),
-                ]
-                if pt_patch.size == 0:
-                    continue
+        # Deduplicate heavily overlapping fused objects (IoU > 0.65)
+        unique_persons: List[TrackedObject] = []
+        for p in fused_list:
+            is_dup = False
+            for up in unique_persons:
+                ix1 = max(p.bbox[0], up.bbox[0])
+                iy1 = max(p.bbox[1], up.bbox[1])
+                ix2 = min(p.bbox[2], up.bbox[2])
+                iy2 = min(p.bbox[3], up.bbox[3])
+                if ix1 < ix2 and iy1 < iy2:
+                    inter_a = (ix2 - ix1) * (iy2 - iy1)
+                    p_a = max(1, p.width * p.height)
+                    if inter_a / float(p_a) > 0.65:
+                        is_dup = True
+                        break
+            if not is_dup:
+                unique_persons.append(p)
 
-                pt_ycrcb = cv2.cvtColor(pt_patch, cv2.COLOR_BGR2YCrCb)
-                cr_val = float(np.mean(pt_ycrcb[:, :, 1]))
-                cb_val = float(np.mean(pt_ycrcb[:, :, 2]))
-                y_val = float(np.mean(pt_ycrcb[:, :, 0]))
-
-                # Human skin and lip chrominance locus in YCrCb (Fitzpatrick I-VI scale & natural lips)
-                # Broadened for real-world webcam lighting, auto-white-balance, and lip color variation
-                is_skin_locus = (105 <= cr_val <= 210) and (60 <= cb_val <= 165) and (18 <= y_val <= 252) and ((cr_val - cb_val) >= 2)
-
-                if has_ref:
-                    chroma_diff = np.sqrt((cr_val - ref_cr) ** 2 + (cb_val - ref_cb) ** 2)
-                    if is_skin_locus and (chroma_diff <= 55.0 or (120 <= cr_val <= 190 and 70 <= cb_val <= 145)):
-                        visible_points_count += 1
-                else:
-                    if is_skin_locus:
-                        visible_points_count += 1
-
-            vis_score = visible_points_count / float(total_points)
-            metrics = {"visible_points": visible_points_count, "total_points": total_points, "vis_score": round(vis_score, 2)}
-            return True, face_bbox, vis_score, landmark_pts, metrics
-
-        except Exception as e:
-            logger.debug(f"[ATM RULES] Face landmarker error: {e}")
-            return False, None, 0.0, [], {"exception": str(e)}
+        return unique_persons, faces
 
     def _check_face_visibility(
         self,

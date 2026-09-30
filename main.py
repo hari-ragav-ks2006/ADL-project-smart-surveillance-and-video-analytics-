@@ -347,9 +347,10 @@ class SurveillancePipeline:
                     all_conditions = []
 
                     if self.mode == "atm" and self.atm_module is not None:
-                        # ATM mode evaluates persons across full frame (strictly person class 0, no zone restriction)
-                        atm_persons = [obj for obj in tracked_objects if obj.class_id == 0]
-                        atm_status, atm_conds, _ = self.atm_module.evaluate_frame(
+                        # ATM mode fuses YOLO body detections with multi-face detections
+                        atm_persons, faces = self.atm_module.fuse_persons_and_faces(frame, tracked_objects)
+                        tracked_objects = atm_persons
+                        atm_status, atm_conds, atm_landmarks = self.atm_module.evaluate_frame(
                             frame, atm_persons, zone_name="ATM Area"
                         )
                         all_conditions.extend(atm_conds)
@@ -629,43 +630,19 @@ class SurveillancePipeline:
                 self.atm_module = ATMRuleModule(self.config.atm_module)
 
             is_blackout, _ = self.atm_module._check_blackout_tamper(frame_resized)
-            precomputed_face = None
 
             if not is_blackout:
-                face_det, face_bbox, vis_score, lms, metrics = self.atm_module._detect_face_and_landmarks(
-                    frame_resized, (0, 0, 640, 360)
-                )
-                
-                if face_det and face_bbox:
-                    virtual_person = TrackedObject(
-                        track_id=1,
-                        bbox=face_bbox,
-                        class_id=0,
-                        confidence=0.95,
-                    )
-                    atm_persons = [virtual_person]
-                    tracked_objects = [virtual_person]
-                    precomputed_face = (True, vis_score, lms)
-                else:
-                    atm_persons = [obj for obj in self.detector.track_frame(frame_resized) if obj.class_id == 0]
-                    if len(atm_persons) > 0:
-                        tracked_objects = atm_persons
-                        precomputed_face = (True, 0.0, [])
-                    else:
-                        virtual_person = TrackedObject(
-                            track_id=1,
-                            bbox=(int(640 * 0.20), int(360 * 0.10), int(640 * 0.80), int(360 * 0.90)),
-                            class_id=0,
-                            confidence=0.90,
-                        )
-                        atm_persons = [virtual_person]
-                        tracked_objects = [virtual_person]
-                        precomputed_face = (True, 0.0, [])
+                yolo_persons = [obj for obj in self.detector.track_frame(frame_resized) if obj.class_id == 0]
+                atm_persons, faces = self.atm_module.fuse_persons_and_faces(frame_resized, yolo_persons)
+                tracked_objects = atm_persons
+            else:
+                atm_persons = []
+                tracked_objects = []
 
             logger.info(f"[ATM-DEBUG] Biometric evaluation: found {len(atm_persons)} person(s)")
 
             atm_status, atm_conds, atm_landmarks = self.atm_module.evaluate_frame(
-                frame_resized, atm_persons, zone_name="ATM Area", precomputed_face=precomputed_face
+                frame_resized, atm_persons, zone_name="ATM Area"
             )
             for cond in atm_conds:
                 deb = 0.0 if cond.alert_type in ("FACE_COVERED", "CAMERA_BLACKOUT") else self.config.atm_module.multi_person_debounce_sec
@@ -708,15 +685,15 @@ class SurveillancePipeline:
             if atm_status.person_count > 1:
                 for p in tracked_objects:
                     custom_labels[p.track_id] = f"#{p.track_id} PERSON: Multiple people"
-                    custom_colors[p.track_id] = [0, 140, 255]
+                    custom_colors[p.track_id] = [0, 140, 255]  # Orange
             elif atm_status.person_count == 1:
                 p = tracked_objects[0]
                 if not atm_status.face_landmarks_visible:
-                    custom_labels[p.track_id] = f"#{p.track_id} USER: Face Covered"
-                    custom_colors[p.track_id] = [0, 140, 255]
+                    custom_labels[p.track_id] = f"#{p.track_id} PERSON: Face covered"
+                    custom_colors[p.track_id] = [0, 140, 255]  # Orange
                 else:
-                    custom_labels[p.track_id] = f"#{p.track_id} USER: Safe"
-                    custom_colors[p.track_id] = [0, 220, 100]
+                    custom_labels[p.track_id] = f"#{p.track_id} PERSON: Safe"
+                    custom_colors[p.track_id] = [0, 220, 100]  # Green
 
         elif target_mode == "restricted":
             if self.restricted_module is None:

@@ -29,7 +29,7 @@ video:
 
 detection:
   model_name: "yolov8n.pt" # "yolov8n.pt", "yolov8s.pt", "yolov8m.pt"
-  confidence_threshold: 0.45
+  confidence_threshold: 0.30
   iou_threshold: 0.45
   tracker_type: "bytetrack.yaml" # "bytetrack.yaml" or "botsort.yaml"
   # Target class: 0: person ONLY
@@ -48,13 +48,13 @@ zones:
 
 atm_module:
   enabled: true
-  face_detection_confidence: 0.50
+  face_detection_confidence: 0.30
   visibility_window_size: 30 # Rolling buffer size (~1s at 30fps)
   covered_threshold: 0.30 # Drop below 30% rolling visibility triggers face covered
   safe_recovery_threshold: 0.70 # Rise above 70% rolling visibility recovers to safe
   show_debug_visibility: true # On-screen live rolling visibility % debug display
-  face_covered_debounce_sec: 1.5 # Seconds face landmarks missing before soft alert triggers
-  multi_person_debounce_sec: 1.5 # Seconds >1 person present before soft alert triggers
+  face_covered_debounce_sec: 1.0 # Seconds face landmarks missing before soft alert triggers
+  multi_person_debounce_sec: 0.5 # Fast responsive multi-person trigger
   blackout_variance_threshold: 12.0 # Variance threshold below which frame is considered blacked out/tampered
   blackout_duration_sec: 20.0 # 20 seconds near-zero variance before critical hard alert & phone escalation
   tts_enabled: true # Announce alerts via Text-To-Speech

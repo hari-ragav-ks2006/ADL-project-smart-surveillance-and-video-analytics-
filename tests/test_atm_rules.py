@@ -232,3 +232,30 @@ def test_atm_blackout_tamper_rule(atm_instance):
     assert blackout_cond.is_active is True
     assert status.blackout_active is True
     assert blackout_cond.trigger_phone_call is True
+
+
+def test_atm_fuse_persons_and_faces(atm_instance, monkeypatch):
+    """Verify fusion of YOLO persons and multi-face detections."""
+    atm = atm_instance
+    frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+
+    # 1 YOLO person detected in center
+    yolo_persons = [TrackedObject(1, 0, "person", 0.90, (200, 100, 440, 480))]
+
+    # Mock detect_all_faces returning 2 distinct faces (one matching YOLO person, one background person)
+    monkeypatch.setattr(
+        atm,
+        "detect_all_faces",
+        lambda f: [
+            {"bbox": (280, 120, 360, 220), "confidence": 0.95, "source": "mp"},
+            {"bbox": (40, 60, 140, 180), "confidence": 0.88, "source": "haar"},
+        ],
+    )
+
+    fused, faces = atm.fuse_persons_and_faces(frame, yolo_persons)
+    assert len(fused) == 2, f"Expected 2 fused persons, got {len(fused)}"
+    assert len(faces) == 2
+    ids = {p.track_id for p in fused}
+    assert 1 in ids  # Original YOLO person preserved
+    assert any(p.track_id >= 100 for p in fused)  # Additional face-based person added
+

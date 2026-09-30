@@ -60,7 +60,8 @@ def verify_scenario(name: str, video_path: str, mode: str, max_frames: int = 150
         # 2. Evaluate mode-specific rules
         all_conds = []
         if mode == "atm" and pipeline.atm_module is not None:
-            persons = [o for o in tracked if o.class_id == 0]
+            raw_persons = [o for o in tracked if o.class_id == 0]
+            persons, _ = pipeline.atm_module.fuse_persons_and_faces(frame, raw_persons)
             status, conds, _ = pipeline.atm_module.evaluate_frame(frame, persons, zone_name="ATM Area")
             all_conds.extend(conds)
 

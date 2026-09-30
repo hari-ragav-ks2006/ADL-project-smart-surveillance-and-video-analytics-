@@ -760,7 +760,7 @@
         const scaleY = ch / 360.0;
         const tel = state.atmTelemetry;
 
-        // 1. Draw Person Bounding Boxes (YOLOv8 ByteTrack)
+        // 1. Draw Person Bounding Boxes (YOLOv8 ByteTrack + Multi-Face Fused)
         state.atmDetections.forEach(obj => {
             const bbox = obj.bbox || [0, 0, 0, 0];
             const x1 = bbox[0] * scaleX;
@@ -768,70 +768,42 @@
             const bw = (bbox[2] - bbox[0]) * scaleX;
             const bh = (bbox[3] - bbox[1]) * scaleY;
 
-            let color = "#10b981"; // Emerald green
-            let label = `#${obj.track_id} PERSON`;
+            let color = "#10b981"; // Emerald green for safe single user
+            let label = `#${obj.track_id} PERSON: SAFE`;
+            let isMulti = tel.person_count > 1;
 
-            if (tel.person_count > 1) {
-                color = "#f59e0b"; // Orange
-                label = `#${obj.track_id} PERSON: MULTIPLE`;
+            if (isMulti) {
+                color = "#f59e0b"; // Vibrant Orange for Multiple People
+                label = `#${obj.track_id} PERSON: MULTIPLE PEOPLE`;
             } else if (tel.face_detected && !tel.face_landmarks_visible) {
-                color = "#f59e0b"; // Orange
-                label = `#${obj.track_id} PERSON`;
+                color = "#f59e0b"; // Orange for face covered
+                label = `#${obj.track_id} PERSON: FACE COVERED`;
+            } else {
+                color = "#10b981"; // Emerald green
+                label = `#${obj.track_id} PERSON: SAFE`;
             }
 
+            // Outer glow & stroke
             atmCtx.strokeStyle = color;
-            atmCtx.lineWidth = 2.0;
+            atmCtx.lineWidth = isMulti ? 3.0 : 2.5;
             atmCtx.strokeRect(x1, y1, bw, bh);
 
-            atmCtx.fillStyle = color === "#10b981" ? "rgba(16, 185, 129, 0.06)" : "rgba(245, 158, 11, 0.08)";
+            // Shaded person area
+            atmCtx.fillStyle = isMulti ? "rgba(245, 158, 11, 0.16)" : (color === "#10b981" ? "rgba(16, 185, 129, 0.10)" : "rgba(245, 158, 11, 0.14)");
             atmCtx.fillRect(x1, y1, bw, bh);
 
+            // Label tag badge
+            atmCtx.font = "bold 11.5px Plus Jakarta Sans, sans-serif";
+            const textWidth = atmCtx.measureText(label).width;
+            const tagH = 20;
+            const tagY = Math.max(0, y1 - tagH);
+
             atmCtx.fillStyle = color;
-            atmCtx.font = "bold 11px Plus Jakarta Sans, sans-serif";
-            atmCtx.fillText(label, x1 + 4, Math.max(14, y1 - 5));
+            atmCtx.fillRect(x1, tagY, textWidth + 12, tagH);
+
+            atmCtx.fillStyle = isMulti ? "#000000" : (color === "#10b981" ? "#000000" : "#ffffff");
+            atmCtx.fillText(label, x1 + 6, tagY + 14);
         });
-
-        // 2. Draw Second, Distinct Bounding Box specifically around FACE (MediaPipe Face Detection)
-        if (tel.face_detected && tel.face_bbox) {
-            const fb = tel.face_bbox;
-            const fx1 = fb[0] * scaleX;
-            const fy1 = fb[1] * scaleY;
-            const fbw = (fb[2] - fb[0]) * scaleX;
-            const fbh = (fb[3] - fb[1]) * scaleY;
-
-            const isCovered = !tel.face_landmarks_visible;
-            const faceColor = isCovered ? "#f59e0b" : "#10b981";
-            const faceTag = isCovered ? "FACE: COVERED" : "FACE: VERIFIED";
-
-            // Distinct double-line / highlight box for the face
-            atmCtx.strokeStyle = faceColor;
-            atmCtx.lineWidth = 2.5;
-            atmCtx.strokeRect(fx1, fy1, fbw, fbh);
-
-            // Subtle face area tint
-            atmCtx.fillStyle = isCovered ? "rgba(245, 158, 11, 0.14)" : "rgba(16, 185, 129, 0.12)";
-            atmCtx.fillRect(fx1, fy1, fbw, fbh);
-
-            // Face label tag badge
-            atmCtx.fillStyle = faceColor;
-            atmCtx.fillRect(fx1, Math.max(0, fy1 - 18), 100, 18);
-            atmCtx.fillStyle = "#ffffff";
-            atmCtx.font = "bold 10px Plus Jakarta Sans, sans-serif";
-            atmCtx.fillText(faceTag, fx1 + 5, Math.max(12, fy1 - 5));
-        }
-
-        // 3. Draw Facial Landmark Points (Nose and Mouth points)
-        if (tel.landmarks && tel.landmarks.length > 0) {
-            tel.landmarks.forEach(pt => {
-                const lx = pt[0] * scaleX;
-                const ly = pt[1] * scaleY;
-
-                atmCtx.beginPath();
-                atmCtx.arc(lx, ly, 3.2, 0, Math.PI * 2);
-                atmCtx.fillStyle = tel.face_landmarks_visible ? "#10b981" : "#f59e0b";
-                atmCtx.fill();
-            });
-        }
 
         // 4. Debug Visibility Overlay (Step 1d - toggleable on-screen text)
         const showDebug = true; // Flag for live debug overlay
